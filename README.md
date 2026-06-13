@@ -1,73 +1,130 @@
-# Gauss-Markov Process Simulator
+# gauss-markov
 
-**A Rust library for simulating and analyzing the Gauss-Markov (Ornstein-Uhlenbeck) process** — the canonical mean-reverting stochastic differential equation `dx = -θ(x-μ)dt + σdW` — with Euler-Maruyama integration, parameter estimation, and closed-form stationary statistics.
+A Rust library for simulating and analyzing the Gauss-Markov process (also known as the Ornstein-Uhlenbeck process). Implements the stochastic differential equation `dx = -θ(x - μ)dt + σdW` via the Euler-Maruyama method, along with parameter estimation and theoretical statistical properties (stationary distribution, autocorrelation function, PDF).
 
 ## Why It Matters
 
-The Ornstein-Uhlenbeck (OU) process is the mathematical foundation of mean-reverting models across science and finance: interest rate models (Vasicek model), neuronal membrane potential (leaky integrate-and-fire), temperature anomalies in climate modeling, and velocity autocorrelation in Brownian dynamics. Unlike geometric Brownian motion, the OU process is stationary and ergodic — it has a well-defined equilibrium distribution and autocorrelation function. This library provides both the simulation engine (to generate sample paths) and the estimation routines (to fit OU parameters from observed data), making it a complete toolkit for time-series analysis.
+The Gauss-Markov process is the canonical model for **mean-reverting noise**. It appears in physics (Brownian motion in a harmonic potential — the Langevin equation), finance (Vasicek interest-rate model), engineering (sensor drift modeling, kalman filter process noise), and biology (ion channel gating). Unlike pure Brownian motion, which wanders without bound, the OU process is pulled toward a long-term mean μ at rate θ, making it stationary and ergodic. This makes it the natural model for any system that fluctuates around equilibrium with memory.
+
+The key insight: the OU process is the unique Gauss-Markov process — it is simultaneously Gaussian-distributed and Markovian (memoryless given the current state). This dual property is why it serves as the process noise model in the Kalman-Bucy filter, the workhorse of estimation theory.
 
 ## How It Works
 
-**Simulation** uses the Euler-Maruyama method — the simplest numerical SDE integrator. For each time step `dt`, the update is `x_{n+1} = x_n - θ(x_n - μ)dt + σ√dt · Z` where `Z ~ N(0,1)` is a standard normal random variable generated via Box-Muller transform from a user-supplied uniform RNG. The `√dt` scaling comes from the quadratic variation of Brownian motion.
+### Stochastic Differential Equation
 
-**Closed-form statistics**: The stationary variance is `σ²/(2θ)`, the autocorrelation at lag τ is `exp(-θ|τ|)`, and the stationary distribution is `N(μ, σ²/(2θ))`. These are computed analytically — **O(1)** — without needing to run the simulation.
+The continuous-time SDE is:
 
-**Parameter estimation**: `estimate_theta` uses the sample autocorrelation at lag 1: `θ ≈ -ln(ρ(Δt))/Δt`. `estimate_mu` is the sample mean. `estimate_sigma` uses the relation `σ² = 2θ·Var(X)`. These are method-of-moments estimators — **O(n)** in the sample size.
+```
+dx(t) = -θ(x(t) - μ) dt + σ dW(t)
+```
+
+where:
+- **θ > 0**: Mean reversion rate (how fast the process returns to μ)
+- **μ**: Long-term equilibrium level
+- **σ > 0**: Volatility (diffusion coefficient)
+- **W(t)**: Standard Wiener process (Brownian motion)
+
+### Euler-Maruyama Discretization
+
+The numerical scheme discretizes time into steps of size Δt:
+
+```
+x_{n+1} = x_n - θ(x_n - μ)Δt + σ√(Δt) · Z_n
+```
+
+where Z_n ~ N(0, 1) are i.i.d. standard normal random variables generated via the Box-Muller transform:
+
+```
+Z = √(-2 ln U₁) · cos(2π U₂)
+```
+
+**Time complexity**: O(N) for N = ⌈(t_end - t_start) / dt⌉ steps.
+
+**Space complexity**: O(N) for storing the trajectory.
+
+### Stationary Distribution
+
+The OU process has a closed-form stationary distribution:
+
+```
+X_∞ ~ N(μ, σ²/(2θ))
+```
+
+The stationary variance `σ²/(2θ)` follows from the fluctuation-dissipation theorem: stronger mean reversion (large θ) reduces variance; stronger noise (large σ) increases it.
+
+### Autocorrelation Function
+
+```
+ρ(τ) = E[(X(t) - μ)(X(t+τ) - μ)] / Var(X) = exp(-θ|τ|)
+```
+
+The autocorrelation decays exponentially with timescale τ_c = 1/θ. This is the **memory** of the process — after τ_c, past values are effectively forgotten.
+
+### Parameter Estimation
+
+Three estimators from sampled data:
+
+| Parameter | Estimator | Formula |
+|-----------|-----------|---------|
+| θ | From lag-1 autocorrelation | `θ̂ = -ln(ρ̂(Δt)) / Δt` |
+| μ | Sample mean | `μ̂ = (1/n) Σ xᵢ` |
+| σ | From stationary variance | `σ̂ = √(2θ̂ · Var(X))` |
+
+The autocorrelation estimator derives from the fact that for the discrete-time OU process sampled at interval Δt:
+
+```
+ρ(Δt) = exp(-θΔt)  ⟹  θ = -ln(ρ) / Δt
+```
+
+### Stability Condition
+
+The Euler-Maruyama scheme is stable when θΔt < 2 (the deterministic part doesn't overshoot). For typical parameters (θ ~ 1, Δt ~ 0.01), this is easily satisfied.
 
 ## Quick Start
 
 ```rust
-use gauss_markov::{GaussMarkovParams, simulate, estimate_theta, estimate_mu};
+use gauss_markov::{GaussMarkovParams, simulate};
 
-fn main() {
-    // Define an OU process: θ=1.0, μ=5.0, σ=0.5
-    let params = GaussMarkovParams::new(1.0, 5.0, 0.5).unwrap();
+let params = GaussMarkovParams::new(1.0, 0.0, 0.5).unwrap();
+let mut rng = || { /* uniform [0,1) generator */ };
 
-    // Simulate from t=0 to t=10 with dt=0.01
-    let mut rng_state = 0u64;
-    let result = simulate(
-        params,
-        0.0,    // x0
-        0.0,    // t_start
-        10.0,   // t_end
-        0.01,   // dt
-        &mut || {
-            // Simple LCG random number generator
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (rng_state >> 11) as f64 / (1u64 << 53) as f64
-        },
-    );
-
-    println!("Generated {} samples", result.values.len());
-
-    // Estimate parameters from the simulated data
-    let theta_hat = estimate_theta(&result.values, 0.01);
-    let mu_hat = estimate_mu(&result.values);
-    println!("Estimated θ = {:.3} (true: 1.0)", theta_hat);
-    println!("Estimated μ = {:.3} (true: 5.0)", mu_hat);
-
-    // Closed-form stationary statistics
-    println!("Stationary std: {:.4}", params.stationary_std());
-    println!("Autocorrelation at τ=1: {:.4}", params.autocorrelation(1.0));
-}
+let result = simulate(params, 0.0, 0.0, 10.0, 0.01, &mut rng);
+println!("Trajectory length: {}", result.values.len());
+println!("Sample mean: {:.3}", result.values.iter().sum::<f64>() / result.values.len() as f64);
 ```
 
 ## API
 
-| Type / Function | Complexity | Description |
-|---|---|---|
-| `GaussMarkovParams::new(θ, μ, σ)` | **O(1)** | Validated parameter construction |
-| `simulate(params, x0, t0, t1, dt, rng)` | **O(n)** | Euler-Maruyama simulation |
-| `estimate_theta(values, dt)` | **O(n)** | Estimate θ from lag-1 autocorrelation |
-| `estimate_mu(values)` | **O(n)** | Sample mean |
-| `estimate_sigma(values, θ)` | **O(n)** | Estimate σ from stationary variance |
-| `stationary_variance()` | **O(1)** | `σ²/(2θ)` |
-| `autocorrelation(τ)` | **O(1)** | `exp(-θ|τ|)` |
-| `stationary_pdf(x)` | **O(1)** | Gaussian density at x |
+### `GaussMarkovParams`
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `new(theta, mu, sigma)` | `Result<Self, &str>` | Validated constructor (θ > 0, σ > 0) |
+| `stationary_variance()` | `f64` | σ²/(2θ) |
+| `stationary_std()` | `f64` | √(σ²/(2θ)) |
+| `autocorrelation(tau)` | `f64` | exp(−θ|τ|) |
+| `stationary_pdf(x)` | `f64` | Normal PDF at x |
+
+### Free Functions
+
+| Function | Description |
+|----------|-------------|
+| `simulate(params, x0, t_start, t_end, dt, rng)` | Euler-Maruyama trajectory |
+| `estimate_theta(values, dt)` | ML estimate of θ from samples |
+| `estimate_mu(values)` | Sample mean |
+| `estimate_sigma(values, theta)` | σ from stationary variance |
 
 ## Architecture Notes
 
-Part of the SuperInstance stochastic modeling suite. Companion crates include `fredholm-equation` (integral equations) and `hermite-polynomial` (quadrature). See the [Architecture Guide](https://github.com/SuperInstance/SuperInstance/blob/main/ARCHITECTURE.md).
+The OU process embodies **γ + η = C** in estimation theory. The process noise (**η**) represents unmodeled dynamics perturbing the system. The Kalman filter (**γ**) uses the OU process model to predict how uncertainty evolves, producing optimal state estimates (**C**). The autocorrelation function ρ(τ) = e^{−θτ} is the transfer function: it tells the filter how much past information to retain. Longer memory (smaller θ) means more smoothing; shorter memory (larger θ) means more responsiveness. This tradeoff between noise rejection and responsiveness is the fundamental tension in feedback control.
+
+## References
+
+- **Ornstein-Uhlenbeck process**: Uhlenbeck, G. E., & Ornstein, L. S. "On the theory of the Brownian motion." *Physical Review* 36.5 (1930): 823.
+- **Euler-Maruyama method**: Kloeden, P. E., & Platen, E. *Numerical Solution of Stochastic Differential Equations.* Springer, 1992.
+- **Fluctuation-dissipation theorem**: Kubo, R. "The fluctuation-dissipation theorem." *Reports on Progress in Physics* 29.1 (1966): 255.
+- **Vasicek model**: Vasicek, O. "An equilibrium characterization of the term structure." *Journal of Financial Economics* 5.2 (1977): 177–188.
+- **Parameter estimation for OU process**: Kessler, M. "Estimation of an ergodic diffusion from discrete observations." *Scandinavian Journal of Statistics* 24.2 (1997): 211–229.
 
 ## License
 
