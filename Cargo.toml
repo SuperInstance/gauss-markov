@@ -1,9 +1,11 @@
 [package]
 name = "gauss-markov"
 version = "0.1.0"
-description = "A Rust library for Gauss Markov"
+description = "Gauss Markov — Rust implementation with the SuperInstance polyformalism canary wired in."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/casey-digennaro/gauss-markov"
+repository = "https://github.com/SuperInstance/gauss-markov"
 edition = "2021"
+
+keywords = ["gauss-markov"]
 
 [dependencies]
